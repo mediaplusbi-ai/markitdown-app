@@ -1,14 +1,22 @@
 import os
 import tempfile
 import shutil
+import json
 from flask import Flask, request, jsonify, render_template
 from markitdown import MarkItDown
 from werkzeug.utils import secure_filename
+from werkzeug.exceptions import RequestEntityTooLarge, HTTPException
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25MB per chunk request (safety margin)
+app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25MB per chunk
 
-from werkzeug.exceptions import RequestEntityTooLarge, HTTPException
+ALLOWED_EXTENSIONS = {
+    'pdf', 'docx', 'doc', 'pptx', 'ppt',
+    'xlsx', 'xls', 'csv', 'json', 'xml',
+    'html', 'htm', 'txt', 'md', 'epub', 'zip'
+}
+
+CHUNKS_BASE = os.path.join(tempfile.gettempdir(), 'markitdown_chunks')
 
 @app.errorhandler(RequestEntityTooLarge)
 def handle_too_large(e):
@@ -22,15 +30,6 @@ def handle_http_exception(e):
 def handle_exception(e):
     return jsonify({'error': str(e)}), 500
 
-ALLOWED_EXTENSIONS = {
-    'pdf', 'docx', 'doc', 'pptx', 'ppt',
-    'xlsx', 'xls', 'csv', 'json', 'xml',
-    'html', 'htm', 'txt', 'md', 'epub', 'zip'
-}
-
-# Temp storage for chunks: { upload_id: { 'chunks': {index: path}, 'total': N, 'filename': str } }
-CHUNK_STORE = {}
-
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -41,71 +40,80 @@ def index():
 
 @app.route('/upload-chunk', methods=['POST'])
 def upload_chunk():
-    """Receive one chunk and store it temporarily."""
-    upload_id  = request.form.get('upload_id')
-    chunk_index = int(request.form.get('chunk_index'))
-    total_chunks = int(request.form.get('total_chunks'))
-    filename    = secure_filename(request.form.get('filename', ''))
-    chunk_file  = request.files.get('chunk')
+    upload_id    = request.form.get('upload_id')
+    chunk_index  = request.form.get('chunk_index')
+    total_chunks = request.form.get('total_chunks')
+    filename     = secure_filename(request.form.get('filename', ''))
+    chunk_file   = request.files.get('chunk')
 
-    if not all([upload_id, chunk_file, filename]):
+    if not all([upload_id, chunk_index is not None, total_chunks, chunk_file, filename]):
         return jsonify({'error': 'Missing parameters'}), 400
 
     if not allowed_file(filename):
         return jsonify({'error': 'File type not supported'}), 400
 
-    # Save chunk to a temp file
-    chunk_dir = os.path.join(tempfile.gettempdir(), 'markitdown_chunks', upload_id)
-    os.makedirs(chunk_dir, exist_ok=True)
-    chunk_path = os.path.join(chunk_dir, f'chunk_{chunk_index}')
-    chunk_file.save(chunk_path)
+    chunk_index  = int(chunk_index)
+    total_chunks = int(total_chunks)
 
-    if upload_id not in CHUNK_STORE:
-        CHUNK_STORE[upload_id] = {'chunks': {}, 'total': total_chunks, 'filename': filename}
-    CHUNK_STORE[upload_id]['chunks'][chunk_index] = chunk_path
+    # Save chunk to disk
+    chunk_dir = os.path.join(CHUNKS_BASE, upload_id)
+    os.makedirs(chunk_dir, exist_ok=True)
+    chunk_file.save(os.path.join(chunk_dir, f'chunk_{chunk_index:05d}'))
+
+    # Save metadata to disk (not memory)
+    meta_path = os.path.join(chunk_dir, 'meta.json')
+    if not os.path.exists(meta_path):
+        with open(meta_path, 'w') as f:
+            json.dump({'total': total_chunks, 'filename': filename}, f)
 
     return jsonify({'received': chunk_index, 'total': total_chunks})
 
 
 @app.route('/convert-chunks', methods=['POST'])
 def convert_chunks():
-    """Reassemble chunks and convert to markdown."""
-    data = request.get_json()
-    upload_id = data.get('upload_id')
+    data      = request.get_json()
+    upload_id = data.get('upload_id') if data else None
 
-    if not upload_id or upload_id not in CHUNK_STORE:
-        return jsonify({'error': 'Invalid or expired upload session'}), 400
+    if not upload_id:
+        return jsonify({'error': 'Missing upload_id'}), 400
 
-    store = CHUNK_STORE[upload_id]
-    total = store['total']
-    filename = store['filename']
-    chunks = store['chunks']
+    chunk_dir = os.path.join(CHUNKS_BASE, upload_id)
+    meta_path = os.path.join(chunk_dir, 'meta.json')
 
-    if len(chunks) != total:
-        return jsonify({'error': f'Missing chunks: got {len(chunks)}/{total}'}), 400
+    if not os.path.exists(meta_path):
+        return jsonify({'error': 'Upload session not found — please try again'}), 400
 
-    suffix = '.' + filename.rsplit('.', 1)[1].lower()
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    total    = meta['total']
+    filename = meta['filename']
+
+    # Verify all chunks are on disk
+    missing = [i for i in range(total) if not os.path.exists(os.path.join(chunk_dir, f'chunk_{i:05d}'))]
+    if missing:
+        return jsonify({'error': f'Missing chunks: {missing}'}), 400
+
+    suffix   = '.' + filename.rsplit('.', 1)[1].lower()
+    tmp_path = None
 
     try:
-        # Reassemble file
+        # Reassemble
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = tmp.name
             for i in range(total):
-                with open(chunks[i], 'rb') as cf:
+                with open(os.path.join(chunk_dir, f'chunk_{i:05d}'), 'rb') as cf:
                     tmp.write(cf.read())
 
         # Convert
-        md = MarkItDown()
+        md     = MarkItDown()
         result = md.convert(tmp_path)
-        text = result.text_content or ''
-
-        char_count = len(text)
-        token_estimate = char_count // 4
+        text   = result.text_content or ''
 
         return jsonify({
             'markdown': text,
-            'chars': char_count,
-            'tokens': token_estimate,
+            'chars':    len(text),
+            'tokens':   len(text) // 4,
             'filename': filename
         })
 
@@ -113,17 +121,12 @@ def convert_chunks():
         return jsonify({'error': str(e)}), 500
 
     finally:
-        # Cleanup
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-        chunk_dir = os.path.join(tempfile.gettempdir(), 'markitdown_chunks', upload_id)
+        if tmp_path:
+            try: os.unlink(tmp_path)
+            except: pass
         shutil.rmtree(chunk_dir, ignore_errors=True)
-        CHUNK_STORE.pop(upload_id, None)
 
 
-# Keep old /convert for backward compat (small files under 10MB)
 @app.route('/convert', methods=['POST'])
 def convert():
     if 'file' not in request.files:
@@ -136,18 +139,18 @@ def convert():
 
     try:
         filename = secure_filename(file.filename)
-        suffix = '.' + filename.rsplit('.', 1)[1].lower()
+        suffix   = '.' + filename.rsplit('.', 1)[1].lower()
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             file.save(tmp.name)
             tmp_path = tmp.name
-        md = MarkItDown()
+        md     = MarkItDown()
         result = md.convert(tmp_path)
-        text = result.text_content or ''
+        text   = result.text_content or ''
         os.unlink(tmp_path)
         return jsonify({
             'markdown': text,
-            'chars': len(text),
-            'tokens': len(text) // 4,
+            'chars':    len(text),
+            'tokens':   len(text) // 4,
             'filename': filename
         })
     except Exception as e:
