@@ -542,7 +542,8 @@
       formData.append('file', file);
       try {
         const res  = await fetch('/convert', { method: 'POST', body: formData });
-        const data = await res.json();
+        let data;
+        try { data = await res.json(); } catch { throw new Error('Server returned an unexpected response'); }
         progress.className = 'progress-bar';
         if (data.error) { progress.style.width = '0%'; setStatus(data.error, 'error'); return; }
         showResult(data);
@@ -574,8 +575,9 @@
 
         const res = await fetch('/upload-chunk', { method: 'POST', body: form });
         if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || 'Chunk upload failed');
+          let errMsg = 'Chunk upload failed';
+          try { const err = await res.json(); errMsg = err.error || errMsg; } catch {}
+          throw new Error(errMsg);
         }
       }
 
@@ -588,7 +590,8 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ upload_id: uploadId })
       });
-      const data = await res.json();
+      let data;
+      try { data = await res.json(); } catch { throw new Error('Server returned an unexpected response'); }
 
       progress.className = 'progress-bar';
       if (data.error) { progress.style.width = '0%'; setStatus(data.error, 'error'); return; }

@@ -8,6 +8,20 @@ from werkzeug.utils import secure_filename
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25MB per chunk request (safety margin)
 
+from werkzeug.exceptions import RequestEntityTooLarge, HTTPException
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_too_large(e):
+    return jsonify({'error': 'Chunk too large — maximum chunk size is 25 MB'}), 413
+
+@app.errorhandler(HTTPException)
+def handle_http_exception(e):
+    return jsonify({'error': f'{e.code} {e.name}: {e.description}'}), e.code
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    return jsonify({'error': str(e)}), 500
+
 ALLOWED_EXTENSIONS = {
     'pdf', 'docx', 'doc', 'pptx', 'ppt',
     'xlsx', 'xls', 'csv', 'json', 'xml',
