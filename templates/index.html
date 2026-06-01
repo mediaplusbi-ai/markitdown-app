@@ -514,6 +514,11 @@
   }
 
   async function uploadFile(file) {
+    if (file.size > 10 * 1024 * 1024) {
+      setStatus('File too large — maximum size is 10 MB on the free plan', 'error');
+      return;
+    }
+
     setStatus(`Converting  ${file.name} …`, 'loading');
     progress.className = 'progress-bar indeterminate';
     output.value = '';
