@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>MarkItDown — Convert files for Claude</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0a0a0f;
+      --surface: #111118;
+      --border: #1e1e2e;
+      --accent: #7c6af7;
+      --accent2: #f7c06a;
+      --text: #e8e8f0;
+      --muted: #5a5a7a;
+      --success: #5af7b8;
+      --error: #f75a7c;
+      --mono: 'DM Mono', monospace;
+      --sans: 'Syne', sans-serif;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      overflow-x: hidden;
+    }
+
+    /* Animated grid background */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(124,106,247,0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(124,106,247,0.04) 1px, transparent 1px);
+      background-size: 48px 48px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* Glowing orb */
+    body::after {
+      content: '';
+      position: fixed;
+      top: -200px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 800px;
+      height: 500px;
+      background: radial-gradient(ellipse, rgba(124,106,247,0.12) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .page {
+      position: relative;
+      z-index: 1;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 24px 80px;
+    }
+
+    /* Header */
+    header {
+      text-align: center;
+      margin-bottom: 48px;
+      animation: fadeDown 0.6s ease both;
+    }
+
+    .logo-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .logo-icon {
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+    }
+
+    h1 {
+      font-size: clamp(28px, 5vw, 42px);
+      font-weight: 800;
+      letter-spacing: -1px;
+      background: linear-gradient(135deg, var(--text) 40%, var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .tagline {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--muted);
+      letter-spacing: 0.5px;
+    }
+
+    /* Badge row */
+    .badges {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-top: 16px;
+    }
+
+    .badge {
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      background: rgba(255,255,255,0.03);
+    }
+
+    /* Main card */
+    .card {
+      width: 100%;
+      max-width: 760px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      overflow: hidden;
+      animation: fadeUp 0.6s ease 0.1s both;
+    }
+
+    /* Drop zone */
+    .drop-zone {
+      padding: 56px 40px;
+      text-align: center;
+      cursor: pointer;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.2s;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .drop-zone::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse at 50% 0%, rgba(124,106,247,0.07), transparent 70%);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .drop-zone:hover::before,
+    .drop-zone.drag-over::before { opacity: 1; }
+
+    .drop-zone.drag-over {
+      background: rgba(124,106,247,0.05);
+      border-color: var(--accent);
+    }
+
+    .drop-icon {
+      font-size: 44px;
+      margin-bottom: 16px;
+      display: block;
+      filter: grayscale(0.3);
+      transition: transform 0.3s;
+    }
+
+    .drop-zone:hover .drop-icon { transform: translateY(-4px); }
+
+    .drop-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+
+    .drop-sub {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .drop-sub span {
+      color: var(--accent);
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+
+    #file-input { display: none; }
+
+    /* Formats row */
+    .formats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: center;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.015);
+    }
+
+    .fmt {
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: rgba(124,106,247,0.1);
+      color: var(--accent);
+      border: 1px solid rgba(124,106,247,0.2);
+    }
+
+    /* Status bar */
+    .status-bar {
+      padding: 14px 24px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 48px;
+    }
+
+    .status-bar.success { color: var(--success); }
+    .status-bar.error { color: var(--error); }
+    .status-bar.loading { color: var(--accent2); }
+
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent2);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+
+    /* Output area */
+    .output-header {
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .output-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .stats {
+      display: flex;
+      gap: 16px;
+    }
+
+    .stat {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .stat strong {
+      color: var(--accent2);
+      font-weight: 500;
+    }
+
+    #output {
+      width: 100%;
+      min-height: 260px;
+      max-height: 400px;
+      background: transparent;
+      border: none;
+      resize: none;
+      padding: 20px 24px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--success);
+      line-height: 1.7;
+      outline: none;
+      overflow-y: auto;
+    }
+
+    #output::placeholder { color: var(--muted); opacity: 0.5; }
+
+    /* Action buttons */
+    .actions {
+      padding: 16px 24px;
+      display: flex;
+      gap: 10px;
+      border-top: 1px solid var(--border);
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 600;
+      padding: 10px 20px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+      transition: all 0.15s;
+      letter-spacing: 0.2px;
+    }
+
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+    }
+    .btn-primary:not(:disabled):hover {
+      background: #9080ff;
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background: rgba(255,255,255,0.06);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:not(:disabled):hover {
+      background: rgba(255,255,255,0.1);
+    }
+
+    .btn-copy-ok {
+      background: var(--success) !important;
+      color: #000 !important;
+    }
+
+    /* Progress bar */
+    .progress-wrap {
+      height: 2px;
+      background: var(--border);
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      transition: width 0.3s ease;
+    }
+
+    .progress-bar.indeterminate {
+      width: 40%;
+      animation: indeterminate 1.2s ease-in-out infinite;
+    }
+
+    /* Footer */
+    footer {
+      margin-top: 32px;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      text-align: center;
+      animation: fadeUp 0.6s ease 0.3s both;
+    }
+
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* Animations */
+    @keyframes fadeDown {
+      from { opacity: 0; transform: translateY(-20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    @keyframes indeterminate {
+      0% { transform: translateX(-150%); }
+      100% { transform: translateX(350%); }
+    }
+
+    /* Scrollbar */
+    #output::-webkit-scrollbar { width: 6px; }
+    #output::-webkit-scrollbar-track { background: transparent; }
+    #output::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <div class="logo-row">
+      <div class="logo-icon">📄</div>
+      <h1>MarkItDown</h1>
+    </div>
+    <p class="tagline">// convert files → token-efficient markdown for Claude</p>
+    <div class="badges">
+      <span class="badge">no sign-up</span>
+      <span class="badge">files not stored</span>
+      <span class="badge">powered by Microsoft MarkItDown</span>
+    </div>
+  </header>
+
+  <div class="card">
+
+    <!-- Drop zone -->
+    <div class="drop-zone" id="drop-zone">
+      <span class="drop-icon">⬇️</span>
+      <p class="drop-title">Drop your file here</p>
+      <p class="drop-sub">or <span onclick="document.getElementById('file-input').click()">browse to upload</span></p>
+      <input type="file" id="file-input" accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.csv,.json,.xml,.html,.htm,.txt,.md,.epub,.zip">
+    </div>
+
+    <!-- Formats -->
+    <div class="formats">
+      <span class="fmt">PDF</span>
+      <span class="fmt">DOCX</span>
+      <span class="fmt">PPTX</span>
+      <span class="fmt">XLSX</span>
+      <span class="fmt">CSV</span>
+      <span class="fmt">HTML</span>
+      <span class="fmt">TXT</span>
+      <span class="fmt">JSON</span>
+      <span class="fmt">XML</span>
+      <span class="fmt">EPUB</span>
+      <span class="fmt">ZIP</span>
+    </div>
+
+    <!-- Progress -->
+    <div class="progress-wrap">
+      <div class="progress-bar" id="progress"></div>
+    </div>
+
+    <!-- Status -->
+    <div class="status-bar" id="status">
+      <span>Ready — drop a file or click browse</span>
+    </div>
+
+    <!-- Output header -->
+    <div class="output-header">
+      <span class="output-label">Markdown output</span>
+      <div class="stats" id="stats" style="display:none">
+        <span class="stat">chars: <strong id="stat-chars">—</strong></span>
+        <span class="stat">~tokens: <strong id="stat-tokens">—</strong></span>
+      </div>
+    </div>
+
+    <!-- Output textarea -->
+    <textarea id="output" readonly placeholder="Converted markdown will appear here..."></textarea>
+
+    <!-- Actions -->
+    <div class="actions">
+      <button class="btn btn-primary" id="copy-btn" disabled onclick="copyOutput()">Copy to Clipboard</button>
+      <button class="btn btn-secondary" id="clear-btn" disabled onclick="clearAll()">Clear</button>
+    </div>
+
+  </div>
+
+  <footer>
+    Built with <a href="https://github.com/microsoft/markitdown" target="_blank">Microsoft MarkItDown</a> &nbsp;·&nbsp;
+    Files are processed and immediately discarded &nbsp;·&nbsp;
+    <a href="https://claude.ai" target="_blank">Open Claude →</a>
+  </footer>
+
+</div>
+
+<script>
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+  const output = document.getElementById('output');
+  const status = document.getElementById('status');
+  const progress = document.getElementById('progress');
+  const copyBtn = document.getElementById('copy-btn');
+  const clearBtn = document.getElementById('clear-btn');
+  const stats = document.getElementById('stats');
+
+  // Drag and drop
+  dropZone.addEventListener('dragover', e => {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file) uploadFile(file);
+  });
+  dropZone.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) uploadFile(fileInput.files[0]);
+  });
+
+  function setStatus(msg, type = '') {
+    status.className = 'status-bar' + (type ? ' ' + type : '');
+    if (type === 'loading') {
+      status.innerHTML = `<div class="spinner"></div><span>${msg}</span>`;
+    } else {
+      const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : 'ℹ️';
+      status.innerHTML = `<span>${icon} ${msg}</span>`;
+    }
+  }
+
+  async function uploadFile(file) {
+    setStatus(`Converting  ${file.name} …`, 'loading');
+    progress.className = 'progress-bar indeterminate';
+    output.value = '';
+    copyBtn.disabled = true;
+    clearBtn.disabled = true;
+    stats.style.display = 'none';
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const res = await fetch('/convert', { method: 'POST', body: formData });
+      const data = await res.json();
+
+      progress.className = 'progress-bar';
+
+      if (data.error) {
+        progress.style.width = '0%';
+        setStatus(data.error, 'error');
+        return;
+      }
+
+      progress.style.width = '100%';
+      output.value = data.markdown;
+      document.getElementById('stat-chars').textContent = data.chars.toLocaleString();
+      document.getElementById('stat-tokens').textContent = data.tokens.toLocaleString();
+      stats.style.display = 'flex';
+
+      setStatus(`${data.filename} converted — ~${data.tokens.toLocaleString()} tokens`, 'success');
+      copyBtn.disabled = false;
+      clearBtn.disabled = false;
+
+      setTimeout(() => { progress.style.width = '0%'; }, 1500);
+
+    } catch (err) {
+      progress.className = 'progress-bar';
+      progress.style.width = '0%';
+      setStatus('Network error — please try again', 'error');
+    }
+  }
+
+  function copyOutput() {
+    navigator.clipboard.writeText(output.value).then(() => {
+      copyBtn.textContent = '✅ Copied!';
+      copyBtn.classList.add('btn-copy-ok');
+      setTimeout(() => {
+        copyBtn.textContent = 'Copy to Clipboard';
+        copyBtn.classList.remove('btn-copy-ok');
+      }, 2000);
+    });
+  }
+
+  function clearAll() {
+    output.value = '';
+    stats.style.display = 'none';
+    setStatus('Ready — drop a file or click browse');
+    copyBtn.disabled = true;
+    clearBtn.disabled = true;
+    fileInput.value = '';
+  }
+</script>
+</body>
+</html>
