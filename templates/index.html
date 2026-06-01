@@ -513,51 +513,104 @@
     }
   }
 
+  const MAX_FILE_SIZE = 20 * 1024 * 1024;   // 20 MB total
+  const CHUNK_SIZE    =  5 * 1024 * 1024;   //  5 MB per chunk
+
+  function generateId() {
+    return Math.random().toString(36).slice(2) + Date.now().toString(36);
+  }
+
   async function uploadFile(file) {
-    if (file.size > 10 * 1024 * 1024) {
-      setStatus('File too large — maximum size is 10 MB on the free plan', 'error');
+    if (file.size > MAX_FILE_SIZE) {
+      setStatus(`File too large — maximum size is 20 MB (your file: ${(file.size/1024/1024).toFixed(1)} MB)`, 'error');
       return;
     }
 
-    setStatus(`Converting  ${file.name} …`, 'loading');
-    progress.className = 'progress-bar indeterminate';
     output.value = '';
     copyBtn.disabled = true;
     clearBtn.disabled = true;
     stats.style.display = 'none';
 
-    const formData = new FormData();
-    formData.append('file', file);
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const uploadId    = generateId();
 
+    // ── Single-chunk path (file ≤ 5 MB): use old /convert endpoint ──
+    if (totalChunks === 1) {
+      setStatus(`Converting ${file.name} …`, 'loading');
+      progress.className = 'progress-bar indeterminate';
+      const formData = new FormData();
+      formData.append('file', file);
+      try {
+        const res  = await fetch('/convert', { method: 'POST', body: formData });
+        const data = await res.json();
+        progress.className = 'progress-bar';
+        if (data.error) { progress.style.width = '0%'; setStatus(data.error, 'error'); return; }
+        showResult(data);
+      } catch {
+        progress.className = 'progress-bar';
+        progress.style.width = '0%';
+        setStatus('Network error — please try again', 'error');
+      }
+      return;
+    }
+
+    // ── Multi-chunk path ──
     try {
-      const res = await fetch('/convert', { method: 'POST', body: formData });
+      // 1. Upload chunks
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const chunk = file.slice(start, start + CHUNK_SIZE);
+
+        setStatus(`Uploading part ${i + 1} of ${totalChunks} …`, 'loading');
+        progress.className = 'progress-bar';
+        progress.style.width = `${Math.round(((i) / totalChunks) * 80)}%`;
+
+        const form = new FormData();
+        form.append('upload_id',    uploadId);
+        form.append('chunk_index',  i);
+        form.append('total_chunks', totalChunks);
+        form.append('filename',     file.name);
+        form.append('chunk',        chunk, file.name);
+
+        const res = await fetch('/upload-chunk', { method: 'POST', body: form });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Chunk upload failed');
+        }
+      }
+
+      // 2. Trigger conversion
+      setStatus('Converting … this may take a moment for large files', 'loading');
+      progress.style.width = '90%';
+
+      const res  = await fetch('/convert-chunks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ upload_id: uploadId })
+      });
       const data = await res.json();
 
       progress.className = 'progress-bar';
-
-      if (data.error) {
-        progress.style.width = '0%';
-        setStatus(data.error, 'error');
-        return;
-      }
-
-      progress.style.width = '100%';
-      output.value = data.markdown;
-      document.getElementById('stat-chars').textContent = data.chars.toLocaleString();
-      document.getElementById('stat-tokens').textContent = data.tokens.toLocaleString();
-      stats.style.display = 'flex';
-
-      setStatus(`${data.filename} converted — ~${data.tokens.toLocaleString()} tokens`, 'success');
-      copyBtn.disabled = false;
-      clearBtn.disabled = false;
-
-      setTimeout(() => { progress.style.width = '0%'; }, 1500);
+      if (data.error) { progress.style.width = '0%'; setStatus(data.error, 'error'); return; }
+      showResult(data);
 
     } catch (err) {
       progress.className = 'progress-bar';
       progress.style.width = '0%';
-      setStatus('Network error — please try again', 'error');
+      setStatus(err.message || 'Network error — please try again', 'error');
     }
+  }
+
+  function showResult(data) {
+    progress.style.width = '100%';
+    output.value = data.markdown;
+    document.getElementById('stat-chars').textContent  = data.chars.toLocaleString();
+    document.getElementById('stat-tokens').textContent = data.tokens.toLocaleString();
+    stats.style.display = 'flex';
+    setStatus(`${data.filename} converted — ~${data.tokens.toLocaleString()} tokens`, 'success');
+    copyBtn.disabled = false;
+    clearBtn.disabled = false;
+    setTimeout(() => { progress.style.width = '0%'; }, 1500);
   }
 
   function copyOutput() {
