@@ -2,10 +2,15 @@ import os
 import tempfile
 import shutil
 import json
+import threading
+import logging
 from flask import Flask, request, jsonify, render_template
 from markitdown import MarkItDown
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge, HTTPException
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25MB per chunk
@@ -18,6 +23,9 @@ ALLOWED_EXTENSIONS = {
 
 CHUNKS_BASE = os.path.join(tempfile.gettempdir(), 'markitdown_chunks')
 
+# Job results store: { job_id: { status, result, error } }
+JOB_STORE = {}
+
 @app.errorhandler(RequestEntityTooLarge)
 def handle_too_large(e):
     return jsonify({'error': 'Chunk too large — maximum chunk size is 25 MB'}), 413
@@ -28,10 +36,12 @@ def handle_http_exception(e):
 
 @app.errorhandler(Exception)
 def handle_exception(e):
+    logger.exception("Unhandled exception")
     return jsonify({'error': str(e)}), 500
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 
 @app.route('/')
 def index():
@@ -48,25 +58,62 @@ def upload_chunk():
 
     if not all([upload_id, chunk_index is not None, total_chunks, chunk_file, filename]):
         return jsonify({'error': 'Missing parameters'}), 400
-
     if not allowed_file(filename):
         return jsonify({'error': 'File type not supported'}), 400
 
     chunk_index  = int(chunk_index)
     total_chunks = int(total_chunks)
 
-    # Save chunk to disk
     chunk_dir = os.path.join(CHUNKS_BASE, upload_id)
     os.makedirs(chunk_dir, exist_ok=True)
     chunk_file.save(os.path.join(chunk_dir, f'chunk_{chunk_index:05d}'))
 
-    # Save metadata to disk (not memory)
     meta_path = os.path.join(chunk_dir, 'meta.json')
     if not os.path.exists(meta_path):
         with open(meta_path, 'w') as f:
             json.dump({'total': total_chunks, 'filename': filename}, f)
 
     return jsonify({'received': chunk_index, 'total': total_chunks})
+
+
+def _do_conversion(job_id, chunk_dir, total, filename):
+    """Runs in a background thread — reassembles chunks and converts."""
+    suffix   = '.' + filename.rsplit('.', 1)[1].lower()
+    tmp_path = None
+    try:
+        JOB_STORE[job_id] = {'status': 'converting'}
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp_path = tmp.name
+            for i in range(total):
+                chunk_path = os.path.join(chunk_dir, f'chunk_{i:05d}')
+                with open(chunk_path, 'rb') as cf:
+                    tmp.write(cf.read())
+
+        logger.info(f"[{job_id}] Reassembled {total} chunks → {tmp_path}")
+
+        md     = MarkItDown()
+        result = md.convert(tmp_path)
+        text   = result.text_content or ''
+
+        JOB_STORE[job_id] = {
+            'status':   'done',
+            'markdown': text,
+            'chars':    len(text),
+            'tokens':   len(text) // 4,
+            'filename': filename,
+        }
+        logger.info(f"[{job_id}] Conversion done — {len(text)} chars")
+
+    except Exception as e:
+        logger.exception(f"[{job_id}] Conversion failed")
+        JOB_STORE[job_id] = {'status': 'error', 'error': str(e)}
+
+    finally:
+        if tmp_path:
+            try: os.unlink(tmp_path)
+            except: pass
+        shutil.rmtree(chunk_dir, ignore_errors=True)
 
 
 @app.route('/convert-chunks', methods=['POST'])
@@ -81,7 +128,7 @@ def convert_chunks():
     meta_path = os.path.join(chunk_dir, 'meta.json')
 
     if not os.path.exists(meta_path):
-        return jsonify({'error': 'Upload session not found — please try again'}), 400
+        return jsonify({'error': 'Upload session not found — please re-upload'}), 400
 
     with open(meta_path) as f:
         meta = json.load(f)
@@ -89,42 +136,28 @@ def convert_chunks():
     total    = meta['total']
     filename = meta['filename']
 
-    # Verify all chunks are on disk
-    missing = [i for i in range(total) if not os.path.exists(os.path.join(chunk_dir, f'chunk_{i:05d}'))]
+    missing = [i for i in range(total)
+               if not os.path.exists(os.path.join(chunk_dir, f'chunk_{i:05d}'))]
     if missing:
         return jsonify({'error': f'Missing chunks: {missing}'}), 400
 
-    suffix   = '.' + filename.rsplit('.', 1)[1].lower()
-    tmp_path = None
+    job_id = upload_id  # reuse same ID
+    JOB_STORE[job_id] = {'status': 'queued'}
 
-    try:
-        # Reassemble
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp_path = tmp.name
-            for i in range(total):
-                with open(os.path.join(chunk_dir, f'chunk_{i:05d}'), 'rb') as cf:
-                    tmp.write(cf.read())
+    t = threading.Thread(target=_do_conversion,
+                         args=(job_id, chunk_dir, total, filename),
+                         daemon=True)
+    t.start()
 
-        # Convert
-        md     = MarkItDown()
-        result = md.convert(tmp_path)
-        text   = result.text_content or ''
+    return jsonify({'job_id': job_id, 'status': 'queued'})
 
-        return jsonify({
-            'markdown': text,
-            'chars':    len(text),
-            'tokens':   len(text) // 4,
-            'filename': filename
-        })
 
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-    finally:
-        if tmp_path:
-            try: os.unlink(tmp_path)
-            except: pass
-        shutil.rmtree(chunk_dir, ignore_errors=True)
+@app.route('/job-status/<job_id>', methods=['GET'])
+def job_status(job_id):
+    job = JOB_STORE.get(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    return jsonify(job)
 
 
 @app.route('/convert', methods=['POST'])
@@ -151,7 +184,7 @@ def convert():
             'markdown': text,
             'chars':    len(text),
             'tokens':   len(text) // 4,
-            'filename': filename
+            'filename': filename,
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
